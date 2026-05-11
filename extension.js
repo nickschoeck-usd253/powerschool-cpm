@@ -140,6 +140,23 @@ function activate(context) {
         }
     });
     
+    // Register all commands first so they're always available regardless of view setup outcome
+    const basicCommands = registerCommands(context, api, treeProvider);
+    const fileCommands = registerFileCommands(context, api, treeProvider);
+    const pluginCommands = registerPluginCommands(context, api, treeProvider);
+    const snippetCommands = registerSnippetCommands(context, api, treeProvider);
+
+    context.subscriptions.push(
+        workspaceWatcher,
+        configWatcher,
+        serverInfoConfigWatcher,
+        fileSaveWatcher,
+        ...basicCommands,
+        ...fileCommands,
+        ...pluginCommands,
+        ...snippetCommands
+    );
+
     // Check if tree view already exists and dispose it
     if (global.powerschoolCpmTreeView) {
         try {
@@ -149,14 +166,13 @@ function activate(context) {
         }
         global.powerschoolCpmTreeView = null;
     }
-    
-    // Register the tree view with error handling
+
     let treeView;
     let serverInfoView;
     let commandsView;
     let templatesView;
     let snippetsView;
-    
+
     try {
         treeView = vscode.window.createTreeView('ps-vscode-cpm-explorer', {
             treeDataProvider: treeProvider,
@@ -259,33 +275,18 @@ function activate(context) {
         
     } catch (error) {
         vscode.window.showErrorMessage('PowerSchool CPM: Tree view registration failed. Please reload VS Code window.');
-        return;
     }
-    
-    
-    // Register all commands using modular command registration
-    const basicCommands = registerCommands(context, api, treeProvider);
-    const fileCommands = registerFileCommands(context, api, treeProvider);
-    const pluginCommands = registerPluginCommands(context, api, treeProvider);
-    const snippetCommands = registerSnippetCommands(context, api, treeProvider);
-    
-    // Add all command disposables to context subscriptions
-    context.subscriptions.push(
-        treeView,
-        serverInfoView,
-        commandsView,
-        templatesView,
-        snippetsView,
-        workspaceWatcher, 
-        configWatcher,
-        serverInfoConfigWatcher,
-        fileSaveWatcher,
-        ...basicCommands,
-        ...fileCommands,
-        ...pluginCommands,
-        ...snippetCommands
-    );
-    
+
+    if (treeView) {
+        context.subscriptions.push(
+            treeView,
+            serverInfoView,
+            commandsView,
+            templatesView,
+            snippetsView
+        );
+    }
+
     vscode.window.showInformationMessage('PowerSchool CPM: Extension activated! Use the PowerSchool CPM icon in the Activity Bar to access your files.');
 }
 

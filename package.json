@@ -2,7 +2,7 @@
   "name": "ps-vscode-cpm",
   "displayName": "ps-vscode-cpm",
   "description": "Manage custom pages in PowerSchool",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "publisher": "zuvy",
   "engines": {
     "vscode": "^1.104.0"
@@ -14,6 +14,7 @@
     "type": "git",
     "url": "https://github.com/zuvy/ps-vscode-cpm.git"
   },
+  "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
   "contributes": {
     "commands": [
