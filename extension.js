@@ -21,7 +21,12 @@ function activate(context) {
 
     // Initialize PowerSchool API and Tree Provider
     const api = new PowerSchoolAPI();
-    api.initialize(); // Load configuration from VS Code settings
+    let initError = null;
+    try {
+        api.initialize(); // Load configuration from VS Code settings
+    } catch (error) {
+        initError = error;
+    }
 
     // Set workspace state for persistent cache storage
     api.setWorkspaceState(context.workspaceState);
@@ -87,7 +92,12 @@ function activate(context) {
 
         if (cpmChanged) {
             api.clearAuth();
-            api.initialize();
+            try {
+                api.initialize();
+                initError = null;
+            } catch (error) {
+                initError = error;
+            }
             const contentRoot = vscode.workspace.getConfiguration('ps-vscode-cpm').get('contentRoot', 'web_root');
             treeProvider.schemaRoot = contentRoot === 'web_root' ? null : contentRoot;
         }
@@ -285,6 +295,17 @@ function activate(context) {
             templatesView,
             snippetsView
         );
+    }
+
+    if (initError) {
+        const message = initError instanceof Error ? initError.message : String(initError);
+        vscode.window
+            .showWarningMessage(`PowerSchool CPM: ${message}`, 'Open Settings')
+            .then(selection => {
+                if (selection === 'Open Settings') {
+                    vscode.commands.executeCommand('workbench.action.openSettings', 'ps-vscode-cpm');
+                }
+            });
     }
 
     vscode.window.showInformationMessage('PowerSchool CPM: Extension activated! Use the PowerSchool CPM icon in the Activity Bar to access your files.');
