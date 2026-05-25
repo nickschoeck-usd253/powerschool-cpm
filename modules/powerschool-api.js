@@ -90,7 +90,7 @@ class PowerSchoolAPI {
             if (eqIdx === -1) continue;
             const name = nameValue.slice(0, eqIdx).trim();
             const value = nameValue.slice(eqIdx + 1).trim();
-            if (name && value) {
+            if (name) {
                 this.cookies.set(name, value);
             }
         }
@@ -154,26 +154,22 @@ class PowerSchoolAPI {
         };
 
         return new Promise((resolve, reject) => {
-            const req = https.request(options, async (res) => {
+            const req = https.request(options, (res) => {
                 this.parseCookies(res.headers['set-cookie']);
-                // consume body so the socket is released before any follow-up request
-                res.resume();
-
-                if (res.statusCode === 302) {
-                    this.sessionValid = true;
-                    this.lastSessionCheck = Date.now();
-                    resolve(true);
-                } else if (res.statusCode === 200) {
-                    // Some PS versions return 200 on success rather than redirecting.
-                    // Verify by probing a page that requires auth.
-                    try {
-                        resolve(await this.checkSession());
-                    } catch (e) {
+                res.on('data', () => {});
+                res.on('end', () => {
+                    if (res.statusCode === 302) {
+                        this.sessionValid = true;
+                        this.lastSessionCheck = Date.now();
+                        resolve(true);
+                    } else if (res.statusCode === 200) {
+                        // Some PS versions return 200 on success rather than redirecting.
+                        // Verify by probing a page that requires auth.
+                        this.checkSession().then(resolve).catch(() => resolve(false));
+                    } else {
                         resolve(false);
                     }
-                } else {
-                    resolve(false);
-                }
+                });
             });
             req.on('error', reject);
             req.write(postData);
