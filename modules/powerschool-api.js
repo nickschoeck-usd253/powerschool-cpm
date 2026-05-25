@@ -74,7 +74,7 @@ class PowerSchoolAPI {
     _httpOptions(path, method, extraHeaders = {}) {
         const url = new URL(this.baseUrl);
         if (url.protocol !== 'https:') {
-            throw new Error('PowerSchool server URL must use https://. Please update ps-vscode-cpm.serverUrl.');
+            throw new Error('PowerSchool server URL must start with https:// (TLS). Please update ps-vscode-cpm.serverUrl.');
         }
         const port = url.port ? parseInt(url.port, 10) : 443;
         return {
@@ -461,7 +461,7 @@ class PowerSchoolAPI {
             .replace(/\//g, '.')
             .replace(/\.(html|htm|js|css|txt)$/i, '');
 
-        const boundary = `----formdata-node-${Math.random().toString(36).substr(2, 16)}`;
+        const boundary = `----formdata-node-${Math.random().toString(36).slice(2, 18)}`;
         const body = generateMultipartData({
             customContentId,
             customContent: content,
