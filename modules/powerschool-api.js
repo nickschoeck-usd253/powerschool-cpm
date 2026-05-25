@@ -49,7 +49,7 @@ class PowerSchoolAPI {
         this.baseUrl = config.get('serverUrl', '').replace(/\/$/, '');
         this.username = config.get('username');
         this.password = config.get('password');
-        this.rejectUnauthorized = !config.get('allowInsecureSsl', false);
+        this.rejectUnauthorized = !config.get('allowInsecureSsl', true);
 
         if (!this.baseUrl) {
             throw new Error('PowerSchool server URL not configured. Please set ps-vscode-cpm.serverUrl in settings.');

@@ -253,6 +253,12 @@
           "description": "PowerSchool server URL (e.g., https://pstest.yourschool.org)",
           "scope": "window"
         },
+        "ps-vscode-cpm.allowInsecureSsl": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow connections to servers with self-signed or internal CA certificates by disabling TLS certificate verification. Enabled by default for compatibility with school district servers. Set to false if your server has a valid public certificate to enable strict TLS verification.",
+          "scope": "window"
+        },
         "ps-vscode-cpm.username": {
           "type": "string",
           "default": "",
