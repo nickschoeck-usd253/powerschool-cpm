@@ -157,6 +157,7 @@ class PowerSchoolAPI {
             const req = https.request(options, (res) => {
                 this.parseCookies(res.headers['set-cookie']);
                 res.on('data', () => {});
+                res.on('error', () => resolve(false));
                 res.on('end', () => {
                     if (res.statusCode === 302) {
                         this.sessionValid = true;
@@ -198,14 +199,15 @@ class PowerSchoolAPI {
             const req = https.request(options, (res) => {
                 this.lastSessionCheck = Date.now();
                 this.parseCookies(res.headers['set-cookie']);
-                
-                if (res.statusCode === 200) {
-                    this.sessionValid = true;
-                    resolve(true);
-                } else {
+                res.on('data', () => {});
+                res.on('error', () => {
                     this.sessionValid = false;
                     resolve(false);
-                }
+                });
+                res.on('end', () => {
+                    this.sessionValid = res.statusCode === 200;
+                    resolve(this.sessionValid);
+                });
             });
             req.on('error', () => {
                 this.sessionValid = false;
