@@ -25,6 +25,7 @@ class PowerSchoolAPI {
 
         this.contentIdCache = new Map();
         this.workspaceState = null;
+        this.rejectUnauthorized = true;
     }
 
     setWorkspaceState(state) {
@@ -48,6 +49,7 @@ class PowerSchoolAPI {
         this.baseUrl = config.get('serverUrl', '').replace(/\/$/, '');
         this.username = config.get('username');
         this.password = config.get('password');
+        this.rejectUnauthorized = !config.get('allowInsecureSsl', false);
 
         if (!this.baseUrl) {
             throw new Error('PowerSchool server URL not configured. Please set ps-vscode-cpm.serverUrl in settings.');
@@ -68,12 +70,14 @@ class PowerSchoolAPI {
      * @param {Record<string, string>} [extraHeaders]
      */
     _httpOptions(path, method, extraHeaders = {}) {
+        const url = new URL(this.baseUrl);
+        const port = url.port ? parseInt(url.port) : (url.protocol === 'https:' ? 443 : 80);
         return {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
+            hostname: url.hostname,
+            port,
             path,
             method,
-            rejectUnauthorized: false,
+            rejectUnauthorized: this.rejectUnauthorized,
             headers: {
                 'User-Agent': 'ps-vscode-cpm/2.5.0',
                 ...extraHeaders
@@ -82,15 +86,19 @@ class PowerSchoolAPI {
     }
 
     /**
-     * All HTTP requests go through here. Drains the response body, fires resolve
-     * exactly once (on 'end') and reject exactly once (on 'error' from either the
-     * request socket or the response stream). Using res.once prevents the double-
-     * settlement that would occur if both 'error' and 'end' fired in the same tick.
+     * All HTTP requests go through here. Drains the response body and settles the
+     * Promise exactly once. A `settled` flag guards against 'close' (early termination)
+     * firing after a successful 'end', and against 'error' + 'close' both rejecting.
+     * A 30 s timeout destroys the socket and rejects if the server stops responding.
      * @param {import('https').RequestOptions & { headers: Record<string, string | number> }} options
      * @param {string | null} [body]
      */
     _httpRequest(options, body = null) {
         return new Promise((resolve, reject) => {
+            let settled = false;
+            /** @param {(v: any) => void} fn @param {any} val */
+            const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+
             if (body !== null) {
                 options.headers['Content-Length'] = Buffer.byteLength(body);
             }
@@ -99,15 +107,17 @@ class PowerSchoolAPI {
                 /** @type {Buffer[]} */
                 const chunks = [];
                 res.on('data', chunk => chunks.push(chunk));
-                res.once('error', reject);
-                res.once('end', () => resolve({
+                res.once('error', err => settle(reject, err));
+                res.once('end', () => settle(resolve, {
                     statusCode: res.statusCode,
                     headers: res.headers,
                     body: Buffer.concat(chunks).toString()
                 }));
+                res.once('close', () => settle(reject, new Error('Connection closed before response completed')));
             });
 
-            req.once('error', reject);
+            req.once('error', err => settle(reject, err));
+            req.setTimeout(30000, () => req.destroy(new Error('Request timed out')));
             if (body !== null) req.write(body);
             req.end();
         });
@@ -269,7 +279,8 @@ class PowerSchoolAPI {
      * Downloads and parses plugin mappings from a server-generated JSON file.
      * The JSON file contains tlist_sql template that generates plugin metadata.
      * Uses direct HTTP access (not /ws/cpm/builtintext) to get the executed JSON.
-     * Expected format: [{ "path": "/path/to/file.html", "plugin": "PluginName", "enabled": "1" }]
+     * Accepts either an array [{ path, plugin, enabled }] or an object keyed by path.
+     * Arrays are normalized to { [path]: { plugin, enabled } } before returning.
      */
     async getPluginMappingsFromJson(jsonFilePath = '/vscode_cpm/plugin_data.json') {
         try {
@@ -611,8 +622,8 @@ class PowerSchoolAPI {
         let result;
         try {
             result = JSON.parse(res.body);
-        } catch {
-            throw new Error('Failed to parse delete response');
+        } catch (err) {
+            throw new Error(`Failed to parse delete response: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         if (res.statusCode === 200) {
