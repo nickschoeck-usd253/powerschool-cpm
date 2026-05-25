@@ -54,9 +54,10 @@ code --list-extensions | grep ps-vscode-cpm
 
 | Setting | Default | Description |
 |---|---|---|
-| `ps-vscode-cpm.serverUrl` | `""` | PowerSchool server URL (e.g., `https://pstest.yourschool.org`) |
+| `ps-vscode-cpm.serverUrl` | `""` | PowerSchool server URL (must use `https://`, e.g., `https://pstest.yourschool.org`) |
 | `ps-vscode-cpm.username` | `""` | PowerSchool admin username |
 | `ps-vscode-cpm.password` | `""` | PowerSchool admin password |
+| `ps-vscode-cpm.allowInsecureSsl` | `true` | Skip TLS certificate verification. Keep `true` for school district servers with self-signed or internal CA certs. Set `false` if your server has a valid public certificate. |
 | `ps-vscode-cpm.pluginWebRoot` | `"web_root"` | Path to `web_root` relative to workspace root |
 | `ps-vscode-cpm.autoSync` | `true` | Automatically sync file tree when workspace opens |
 | `ps-vscode-cpm.maxDepth` | `5` | Maximum folder depth to sync from PowerSchool |

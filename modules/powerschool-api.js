@@ -71,7 +71,10 @@ class PowerSchoolAPI {
      */
     _httpOptions(path, method, extraHeaders = {}) {
         const url = new URL(this.baseUrl);
-        const port = url.port ? parseInt(url.port) : (url.protocol === 'https:' ? 443 : 80);
+        if (url.protocol !== 'https:') {
+            throw new Error('PowerSchool server URL must use https://. Please update ps-vscode-cpm.serverUrl.');
+        }
+        const port = url.port ? parseInt(url.port, 10) : 443;
         return {
             hostname: url.hostname,
             port,
