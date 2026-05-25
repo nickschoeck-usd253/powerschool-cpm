@@ -250,7 +250,13 @@
         "ps-vscode-cpm.serverUrl": {
           "type": "string",
           "default": "",
-          "description": "PowerSchool server URL (e.g., https://pstest.yourschool.org)",
+          "description": "PowerSchool server URL (must start with https://, e.g., https://pstest.yourschool.org)",
+          "scope": "window"
+        },
+        "ps-vscode-cpm.allowInsecureSsl": {
+          "type": "boolean",
+          "default": false,
+          "description": "Disable TLS certificate verification (insecure). Set to true only if your PowerSchool server uses a self-signed or internal CA certificate. Requests include admin credentials — leave false unless required.",
           "scope": "window"
         },
         "ps-vscode-cpm.username": {

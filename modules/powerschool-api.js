@@ -1,8 +1,8 @@
 const vscode = require('vscode');
 const https = require('https');
-const pathUtils = require('./path-utils');
+// @ts-ignore — JSON require is valid at runtime; resolveJsonModule not set in jsconfig
+const PKG_VERSION = require('../package.json').version ?? '0.0.0';
 
-// Helper function to generate multipart form data
 function generateMultipartData(fields, boundary) {
     let data = '';
     for (const [name, value] of Object.entries(fields)) {
@@ -20,48 +20,39 @@ class PowerSchoolAPI {
         this.username = '';
         this.password = '';
 
-        // Session properties
         this.sessionValid = false;
         this.lastSessionCheck = 0;
-        this.sessionCheckInterval = 5 * 60 * 1000; // 5 minutes
+        this.sessionCheckInterval = 5 * 60 * 1000;
         this.cookies = new Map();
-        this.sessionCookies = '';
-        
-        // Cache for customContentId (in-memory + persistent storage)
-        // Map: filePath -> customContentId
+
         this.contentIdCache = new Map();
-        this.workspaceState = null; // Set by extension on init
+        this.workspaceState = null;
+        this.rejectUnauthorized = true;
     }
-    
-    // Set workspace state storage (called by extension.js)
+
     setWorkspaceState(state) {
         this.workspaceState = state;
         this.loadCacheFromStorage();
     }
-    
-    // Load cache from persistent storage
+
     loadCacheFromStorage() {
         if (!this.workspaceState) return;
-        
         const stored = this.workspaceState.get('ps-cpm-contentIdCache', {});
         this.contentIdCache = new Map(Object.entries(stored));
     }
-    
-    // Save cache to persistent storage
+
     saveCacheToStorage() {
         if (!this.workspaceState) return;
-        
-        const obj = Object.fromEntries(this.contentIdCache);
-        this.workspaceState.update('ps-cpm-contentIdCache', obj);
+        this.workspaceState.update('ps-cpm-contentIdCache', Object.fromEntries(this.contentIdCache));
     }
 
-    // Initialize from VS Code settings
     initialize() {
         const config = vscode.workspace.getConfiguration('ps-vscode-cpm');
         this.baseUrl = config.get('serverUrl', '').replace(/\/$/, '');
         this.username = config.get('username');
         this.password = config.get('password');
-        
+        this.rejectUnauthorized = !config.get('allowInsecureSsl', false);
+
         if (!this.baseUrl) {
             throw new Error('PowerSchool server URL not configured. Please set ps-vscode-cpm.serverUrl in settings.');
         }
@@ -71,60 +62,102 @@ class PowerSchoolAPI {
         this.sessionValid = false;
         this.lastSessionCheck = 0;
         this.cookies.clear();
-        this.sessionCookies = '';
-        // DON'T clear content ID cache - it persists across auth changes
-        // this.contentIdCache.clear();
     }
 
-    async ensureAuthenticated() {
-        await this.ensureSessionAuth();
+    // ── HTTP layer ──────────────────────────────────────────────────────────
+
+    /**
+     * @param {string} path
+     * @param {string} method
+     * @param {Record<string, string>} [extraHeaders]
+     */
+    _httpOptions(path, method, extraHeaders = {}) {
+        const url = new URL(this.baseUrl);
+        if (url.protocol !== 'https:') {
+            throw new Error('PowerSchool server URL must start with https:// (TLS). Please update ps-vscode-cpm.serverUrl.');
+        }
+        const port = url.port ? parseInt(url.port, 10) : 443;
+        return {
+            hostname: url.hostname,
+            port,
+            path,
+            method,
+            rejectUnauthorized: this.rejectUnauthorized,
+            headers: {
+                'User-Agent': `ps-vscode-cpm/${PKG_VERSION}`,
+                ...extraHeaders
+            }
+        };
     }
 
-    // Session-based authentication methods
+    /**
+     * All HTTP requests go through here. Drains the response body and settles the
+     * Promise exactly once. A `settled` flag guards against 'close' (early termination)
+     * firing after a successful 'end', and against 'error' + 'close' both rejecting.
+     * A 30 s timeout destroys the socket and rejects if the server stops responding.
+     * @param {import('https').RequestOptions & { headers: Record<string, string | number> }} options
+     * @param {string | null} [body]
+     */
+    _httpRequest(options, body = null) {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            /** @param {(v: any) => void} fn @param {any} val */
+            const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+
+            if (body !== null) {
+                options.headers['Content-Length'] = Buffer.byteLength(body);
+            }
+
+            const req = https.request(options, (res) => {
+                /** @type {Buffer[]} */
+                const chunks = [];
+                res.on('data', chunk => chunks.push(chunk));
+                res.once('error', err => settle(reject, err));
+                res.once('end', () => settle(resolve, {
+                    statusCode: res.statusCode,
+                    headers: res.headers,
+                    body: Buffer.concat(chunks).toString()
+                }));
+                res.once('close', () => settle(reject, new Error('Connection closed before response completed')));
+            });
+
+            req.once('error', err => settle(reject, err));
+            req.setTimeout(30000, () => req.destroy(new Error('Request timed out')));
+            if (body !== null) req.write(body);
+            req.end();
+        });
+    }
+
+    // ── Cookie management ───────────────────────────────────────────────────
+
     parseCookies(cookieHeaders) {
         if (!cookieHeaders) return;
-        
         for (const cookie of cookieHeaders) {
             const [nameValue] = cookie.split(';');
-            const [name, value] = nameValue.split('=');
-            if (name && value) {
-                this.cookies.set(name.trim(), value.trim());
+            const eqIdx = nameValue.indexOf('=');
+            if (eqIdx === -1) continue;
+            const name = nameValue.slice(0, eqIdx).trim();
+            const value = nameValue.slice(eqIdx + 1).trim();
+            if (name) {
+                this.cookies.set(name, value);
             }
         }
     }
 
     getCookieHeader() {
-        if (this.cookies.size === 0) {
-            return '';
-        }
-        
-        const cookieStrings = [];
+        const parts = [];
         for (const [name, value] of this.cookies) {
-            cookieStrings.push(`${name}=${value}`);
+            parts.push(`${name}=${value}`);
         }
-        return cookieStrings.join('; ');
+        return parts.join('; ');
     }
 
-    async getLoginPage() {
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: '/admin/pw.html',
-            method: 'GET',
-            rejectUnauthorized: false,
-            headers: {
-                'User-Agent': 'ps-vscode-cpm/2.5.0'
-            }
-        };
+    // ── Session authentication ──────────────────────────────────────────────
 
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                this.parseCookies(res.headers['set-cookie']);
-                resolve();
-            });
-            req.on('error', reject);
-            req.end();
-        });
+    async getLoginPage() {
+        const opts = this._httpOptions('/admin/pw.html', 'GET');
+        const res = await this._httpRequest(opts);
+        this.parseCookies(res.headers['set-cookie']);
     }
 
     async submitLogin() {
@@ -135,37 +168,28 @@ class PowerSchoolAPI {
             request_locale: 'en_US'
         }).toString();
 
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: '/admin/home.html',
-            method: 'POST',
-            rejectUnauthorized: false,
-            headers: {
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': Buffer.byteLength(postData),
-                'Cookie': this.getCookieHeader(),
-                'Referer': `${this.baseUrl}/admin/pw.html`
-            }
-        };
-
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                this.parseCookies(res.headers['set-cookie']);
-                
-                if (res.statusCode === 200 || res.statusCode === 302) {
-                    this.sessionValid = true;
-                    this.lastSessionCheck = Date.now();
-                    resolve(true);
-                } else {
-                    resolve(false);
-                }
-            });
-            req.on('error', reject);
-            req.write(postData);
-            req.end();
+        const opts = this._httpOptions('/admin/home.html', 'POST', {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Cookie': this.getCookieHeader(),
+            'Referer': `${this.baseUrl}/admin/pw.html`
         });
+
+        const res = await this._httpRequest(opts, postData);
+        this.parseCookies(res.headers['set-cookie']);
+
+        if (res.statusCode === 302) {
+            this.sessionValid = true;
+            this.lastSessionCheck = Date.now();
+            return true;
+        }
+
+        if (res.statusCode === 200) {
+            // Some PS versions return 200 on success rather than redirecting.
+            // Verify by probing a page that requires auth.
+            return this.checkSession();
+        }
+
+        return false;
     }
 
     async checkSession() {
@@ -173,129 +197,86 @@ class PowerSchoolAPI {
             return true;
         }
 
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: '/admin/customization/home.html',
-            method: 'GET',
-            rejectUnauthorized: false,
-            headers: {
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                'Cookie': this.getCookieHeader()
-            }
-        };
-
-        return new Promise((resolve) => {
-            const req = https.request(options, (res) => {
-                this.lastSessionCheck = Date.now();
-                this.parseCookies(res.headers['set-cookie']);
-                
-                if (res.statusCode === 200) {
-                    this.sessionValid = true;
-                    resolve(true);
-                } else {
-                    this.sessionValid = false;
-                    resolve(false);
-                }
-            });
-            req.on('error', () => {
-                this.sessionValid = false;
-                resolve(false);
-            });
-            req.end();
+        const opts = this._httpOptions('/admin/customization/home.html', 'GET', {
+            'Cookie': this.getCookieHeader()
         });
+
+        try {
+            const res = await this._httpRequest(opts);
+            this.lastSessionCheck = Date.now();
+            this.parseCookies(res.headers['set-cookie']);
+            this.sessionValid = res.statusCode === 200;
+            return this.sessionValid;
+        } catch {
+            this.sessionValid = false;
+            return false;
+        }
     }
 
     async ensureSessionAuth() {
         let isLoggedIn = await this.checkSession();
-        
+
         if (!isLoggedIn) {
             if (!this.username || !this.password) {
                 throw new Error('PowerSchool session credentials missing. Please configure username and password in VS Code settings.');
             }
-            
             await this.getLoginPage();
             isLoggedIn = await this.submitLogin();
-            
             if (!isLoggedIn) {
                 throw new Error('PowerSchool login failed. Please check your credentials.');
             }
         }
-        
+
         return true;
+    }
+
+    async ensureAuthenticated() {
+        await this.ensureSessionAuth();
     }
 
     getAuthHeaders() {
         return { 'Cookie': this.getCookieHeader() };
     }
 
+    // ── API requests ────────────────────────────────────────────────────────
+
     async makeRequest(endpoint, method = 'GET', data = null) {
         await this.ensureAuthenticated();
 
-        const authHeaders = this.getAuthHeaders();
-        const isPost = method === 'POST';
-        
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: endpoint,
-            method: method,
-            rejectUnauthorized: false,
-            headers: {
-                'Accept': 'application/json',
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                ...authHeaders
-            }
+        const body = data ? (typeof data === 'string' ? data : JSON.stringify(data)) : null;
+        /** @type {Record<string, string>} */
+        const extraHeaders = {
+            'Accept': 'application/json',
+            ...this.getAuthHeaders()
         };
 
-        if (isPost && data) {
-            const postData = typeof data === 'string' ? data : JSON.stringify(data);
-            options.headers['Content-Type'] = typeof data === 'string' ? 'application/x-www-form-urlencoded' : 'application/json';
-            options.headers['Content-Length'] = Buffer.byteLength(postData);
+        if (body) {
+            extraHeaders['Content-Type'] = typeof data === 'string'
+                ? 'application/x-www-form-urlencoded'
+                : 'application/json';
         }
 
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                let responseData = '';
-                res.on('data', chunk => responseData += chunk);
-                res.on('end', () => {
-                    if (res.statusCode === 403) {
-                        reject(new Error('Insufficient PowerSchool permissions. Ensure your account has CPM admin access.'));
-                        return;
-                    }
-                    try {
-                        const result = responseData ? JSON.parse(responseData) : {};
-                        resolve({ statusCode: res.statusCode, data: result });
-                    } catch (error) {
-                        resolve({ statusCode: res.statusCode, data: responseData });
-                    }
-                });
-            });
+        const opts = this._httpOptions(endpoint, method, extraHeaders);
+        const res = await this._httpRequest(opts, body);
 
-            req.on('error', error => reject(error));
-            
-            if (isPost && data) {
-                const postData = typeof data === 'string' ? data : JSON.stringify(data);
-                req.write(postData);
-            }
-            
-            req.end();
-        });
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions. Ensure your account has CPM admin access.');
+        }
+
+        try {
+            return { statusCode: res.statusCode, data: res.body ? JSON.parse(res.body) : {} };
+        } catch {
+            return { statusCode: res.statusCode, data: res.body };
+        }
     }
 
     async getFolderTree(path = '/', maxDepth = 1) {
-        const queryParams = new URLSearchParams({
-            path: path,
-            maxDepth: maxDepth.toString()
-        });
+        const queryParams = new URLSearchParams({ path, maxDepth: maxDepth.toString() });
+        const response = await this.makeRequest(`/ws/cpm/tree?${queryParams}`);
 
-        const endpoint = `/ws/cpm/tree?${queryParams.toString()}`;
-        const response = await this.makeRequest(endpoint);
-        
         if (response.statusCode !== 200) {
             throw new Error(`Failed to get folder tree: HTTP ${response.statusCode}`);
         }
-
         return response.data;
     }
 
@@ -303,45 +284,38 @@ class PowerSchoolAPI {
      * Downloads and parses plugin mappings from a server-generated JSON file.
      * The JSON file contains tlist_sql template that generates plugin metadata.
      * Uses direct HTTP access (not /ws/cpm/builtintext) to get the executed JSON.
-     * Expected format: [{ "path": "/path/to/file.html", "plugin": "PluginName", "enabled": "1" }]
+     * Accepts either an array [{ path, plugin, enabled }] or an object keyed by path.
+     * Arrays are normalized to { [path]: { plugin, enabled } } before returning.
      */
     async getPluginMappingsFromJson(jsonFilePath = '/vscode_cpm/plugin_data.json') {
         try {
-            const endpoint = jsonFilePath;
-            const response = await this.makeRequest(endpoint);
-            
-            if (response.statusCode !== 200) {
-                return null;
-            }
+            const response = await this.makeRequest(jsonFilePath);
+            if (response.statusCode !== 200) return null;
 
-            // Parse the JSON content
             let pluginData;
             try {
-                if (typeof response.data === 'string') {
-                    pluginData = JSON.parse(response.data);
-                } else {
-                    pluginData = response.data;
-                }
-            } catch (parseError) {
+                pluginData = typeof response.data === 'string'
+                    ? JSON.parse(response.data)
+                    : response.data;
+            } catch {
                 return null;
             }
 
-            // Normalize to object format if it's an array
             if (Array.isArray(pluginData)) {
                 const normalized = {};
-                pluginData.forEach(item => {
+                for (const item of pluginData) {
                     if (item.path) {
                         normalized[item.path] = {
                             plugin: item.plugin || item.pluginName || 'Unknown',
                             enabled: item.enabled !== false
                         };
                     }
-                });
+                }
                 pluginData = normalized;
             }
-            
+
             return pluginData;
-        } catch (error) {
+        } catch {
             return null;
         }
     }
@@ -396,269 +370,166 @@ class PowerSchoolAPI {
      * Downloads file content along with metadata (customContentId, etc.)
      * Used for conflict detection during sync operations.
      * @param {string} filePath - Remote path to the file
-     * @returns {Promise<{content: string, customContentId: number|null, isCustom: boolean, rawResponse: object}>}
+     * @returns {Promise<{content: string, customContentId: number|null, isCustom: boolean, rawResponse: object|null}>}
+     *
+     * Priority order for content fields:
+     * 1. customPageContent — new custom files (not built-ins; LoadFolderInfo=false path)
+     * 2. activeCustomText — active customized content for built-in files (skip "not available" placeholder)
+     * 3. builtInText — original built-in content fallback (skip "not available" placeholder)
      */
     async downloadFileWithMetadata(filePath) {
-        const queryParams = new URLSearchParams({
-            LoadFolderInfo: 'false',
-            path: filePath
-        });
-
-        const endpoint = `/ws/cpm/builtintext?${queryParams.toString()}`;
+        const queryParams = new URLSearchParams({ LoadFolderInfo: 'false', path: filePath });
         await this.ensureAuthenticated();
 
-        const authHeaders = this.getAuthHeaders();
-
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: endpoint,
-            method: 'GET',
-            rejectUnauthorized: false,
-            headers: {
-                'Referer': `${this.baseUrl}/admin/customization/home.html`,
-                'Accept': 'application/json',
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                ...authHeaders
-            }
-        };
-
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    if (res.statusCode === 200) {
-                        try {
-                            const result = JSON.parse(data);
-                            // Priority order for content:
-                            // 1. customPageContent - custom files (when using LoadFolderInfo=false)
-                            // 2. builtInText - built-in files (actual content, or "Built in file... not available" if doesn't exist)
-                            // 3. activeCustomText - customized files (or "Active custom file... not available" for non-custom)
-                            // Check builtInText first and only use it if it's not an error message
-                            let content = '';
-                            if (result.builtInText && !result.builtInText.startsWith('Built in file')) {
-                                content = result.builtInText;
-                            } else if (result.customPageContent) {
-                                content = result.customPageContent;
-                            } else if (result.activeCustomText && !result.activeCustomText.startsWith('Active custom file')) {
-                                content = result.activeCustomText;
-                            }
-
-                            // Extract customContentId and cache it
-                            // Fallback: if no active content yet but version history exists, use first entry
-                            let customContentId = result.activeCustomContentId || null;
-                            if (!customContentId && result.versionAssetContentIds && result.versionAssetContentIds.length > 0) {
-                                customContentId = result.versionAssetContentIds[0];
-                            }
-                            if (customContentId) {
-                                this.contentIdCache.set(filePath, customContentId);
-                                this.saveCacheToStorage();
-                            }
-
-                            resolve({
-                                content,
-                                customContentId,
-                                isCustom: result.isCustom === true,
-                                rawResponse: result
-                            });
-                        } catch (error) {
-                            resolve({
-                                content: data,
-                                customContentId: null,
-                                isCustom: false,
-                                rawResponse: null
-                            });
-                        }
-                    } else if (res.statusCode === 403) {
-                        reject(new Error('Insufficient PowerSchool permissions to access this file.'));
-                    } else {
-                        reject(new Error(`Download failed: HTTP ${res.statusCode}`));
-                    }
-                });
-            });
-
-            req.on('error', error => reject(error));
-            req.end();
+        const opts = this._httpOptions(`/ws/cpm/builtintext?${queryParams}`, 'GET', {
+            'Referer': `${this.baseUrl}/admin/customization/home.html`,
+            'Accept': 'application/json',
+            ...this.getAuthHeaders()
         });
+
+        const res = await this._httpRequest(opts);
+
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions to access this file.');
+        }
+        if (res.statusCode !== 200) {
+            throw new Error(`Download failed: HTTP ${res.statusCode}`);
+        }
+
+        try {
+            const result = JSON.parse(res.body);
+
+            let content = '';
+            if (result.customPageContent) {
+                content = result.customPageContent;
+            } else if (result.activeCustomText && !result.activeCustomText.startsWith('Active custom file')) {
+                content = result.activeCustomText;
+            } else if (result.builtInText && !result.builtInText.startsWith('Built in file')) {
+                content = result.builtInText;
+            }
+
+            // Fallback: if no active content yet but version history exists, use first entry
+            let customContentId = result.activeCustomContentId || null;
+            if (!customContentId && result.versionAssetContentIds?.length > 0) {
+                customContentId = result.versionAssetContentIds[0];
+            }
+            if (customContentId) {
+                this.contentIdCache.set(filePath, customContentId);
+                this.saveCacheToStorage();
+            }
+
+            return { content, customContentId, isCustom: result.isCustom === true, rawResponse: result };
+        } catch {
+            return { content: res.body, customContentId: null, isCustom: false, rawResponse: null };
+        }
     }
 
     async uploadFileContent(filePath, content, { isCustom = true, builtInContent = '' } = {}) {
         await this.ensureAuthenticated();
 
-        // If the file has never been customized, promote it first to create an initial draft
         if (!isCustom) {
             await this.customizeAsset(filePath, builtInContent);
-            // contentIdCache now has the new activeCustomContentId set by customizeAsset
         }
 
-        // FIRST: Check cache for existing customContentId (fastest path)
         const cachedId = this.contentIdCache.get(filePath);
         if (cachedId) {
             try {
-                const result = await this._doUpload(filePath, content, cachedId);
-                return result;
-            } catch (error) {
-                // Cache is stale - clear it and continue to fetch fresh ID
+                return await this._doUpload(filePath, content, cachedId);
+            } catch {
                 this.contentIdCache.delete(filePath);
-                // Fall through to fetch actual ID
             }
         }
-        
-        // SECOND: No cache, try to fetch actual customContentId from PowerSchool
-        // This handles existing files that weren't cached yet
+
         try {
             const fileInfo = await this.downloadFileInfo(filePath);
             const customContentId = fileInfo?.activeCustomContentId;
-            
             if (customContentId) {
                 this.contentIdCache.set(filePath, customContentId);
                 this.saveCacheToStorage();
                 return await this._doUpload(filePath, content, customContentId);
             }
-        } catch (error) {
-            // File doesn't exist on PowerSchool - it's a new file
+        } catch {
+            // file doesn't exist on PowerSchool yet — treat as new
         }
-        
-        // THIRD: File is new, use customContentId: 0
-        try {
-            const result = await this._doUpload(filePath, content, 0);
-            return result;
-        } catch (error) {
-            throw error;
-        }
+
+        return this._doUpload(filePath, content, 0);
     }
-    
+
     async _doUpload(filePath, content, customContentId) {
-        const endpoint = '/ws/cpm/customPageContent';
-        
-        // Generate key path from file path
-        const keyPath = filePath.replace(/^\/+/, '').replace(/\//g, '.').replace(/\.(html|htm|js|css|txt)$/i, '');
-        
-        // Generate boundary for multipart data
-        const boundary = `----formdata-node-${Math.random().toString(36).substr(2, 16)}`;
-        
-        // Create multipart form data
-        const formFields = {
-            'customContentId': customContentId,  // Use provided ID (0 for new, actual ID for updates)
-            'customContent': content,
-            'customContentPath': filePath,
-            'keyPath': keyPath,
-            'keyValueMap': 'null',
-            'publish': 'true'
-        };
-        
-        const multipartData = generateMultipartData(formFields, boundary);
-        const authHeaders = this.getAuthHeaders();
-        
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: endpoint,
-            method: 'POST',
-            rejectUnauthorized: false,
-            headers: {
-                'Referer': `${this.baseUrl}/admin/customization/home.html`,
-                'Accept': 'application/json',
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                'Content-Length': Buffer.byteLength(multipartData),
-                ...authHeaders
-            }
-        };
+        const keyPath = filePath
+            .replace(/^\/+/, '')
+            .replace(/\//g, '.')
+            .replace(/\.(html|htm|js|css|txt)$/i, '');
 
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    if (res.statusCode >= 200 && res.statusCode < 300) {
-                        try {
-                            const result = JSON.parse(data);
-                            
-                            // PowerSchool returns HTTP 200 even on errors - check the message
-                            if (result.returnMessage && result.returnMessage.includes('system error')) {
-                                reject(new Error(result.returnMessage));
-                            } else if (result.returnMessage && result.returnMessage.includes('could not be saved')) {
-                                reject(new Error(result.returnMessage));
-                            } else {
-                                // Update cache with new activeCustomContentId returned after publish
-                                if (result.activeCustomContentId) {
-                                    this.contentIdCache.set(filePath, result.activeCustomContentId);
-                                    this.saveCacheToStorage();
-                                }
-                                resolve(result);
-                            }
-                        } catch (error) {
-                            resolve({ success: true, raw: data });
-                        }
-                    } else if (res.statusCode === 403) {
-                        reject(new Error('Insufficient PowerSchool permissions to publish this file.'));
-                    } else {
-                        reject(new Error(`Upload failed: HTTP ${res.statusCode}`));
-                    }
-                });
-            });
+        const boundary = `----formdata-node-${Math.random().toString(36).slice(2, 18)}`;
+        const body = generateMultipartData({
+            customContentId,
+            customContent: content,
+            customContentPath: filePath,
+            keyPath,
+            keyValueMap: 'null',
+            publish: 'true'
+        }, boundary);
 
-            req.on('error', error => {
-                reject(error);
-            });
-            req.write(multipartData);
-            req.end();
+        const opts = this._httpOptions('/ws/cpm/customPageContent', 'POST', {
+            'Referer': `${this.baseUrl}/admin/customization/home.html`,
+            'Accept': 'application/json',
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            ...this.getAuthHeaders()
         });
+
+        const res = await this._httpRequest(opts, body);
+
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions to publish this file.');
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+            throw new Error(`Upload failed: HTTP ${res.statusCode}`);
+        }
+
+        let result;
+        try {
+            result = JSON.parse(res.body);
+        } catch {
+            return { success: true, raw: res.body };
+        }
+
+        if (result.returnMessage?.includes('system error') || result.returnMessage?.includes('could not be saved')) {
+            throw new Error(result.returnMessage);
+        }
+        if (result.activeCustomContentId) {
+            this.contentIdCache.set(filePath, result.activeCustomContentId);
+            this.saveCacheToStorage();
+        }
+        return result;
     }
 
     async downloadFileInfo(filePath) {
-        const queryParams = new URLSearchParams({
-            LoadFolderInfo: 'true',
-            path: filePath
-        });
-
-        const endpoint = `/ws/cpm/builtintext?${queryParams.toString()}`;
+        const queryParams = new URLSearchParams({ LoadFolderInfo: 'true', path: filePath });
         await this.ensureAuthenticated();
-        
-        const authHeaders = this.getAuthHeaders();
-        
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: endpoint,
-            method: 'GET',
-            rejectUnauthorized: false,
-            headers: {
-                'Referer': `${this.baseUrl}/admin/customization/home.html`,
-                'Accept': 'application/json',
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                ...authHeaders
-            }
-        };
 
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    if (res.statusCode === 200) {
-                        try {
-                            const fileInfo = JSON.parse(data);
-                            // Cache the customContentId for future uploads
-                            if (fileInfo.activeCustomContentId) {
-                                this.contentIdCache.set(filePath, fileInfo.activeCustomContentId);
-                                this.saveCacheToStorage();
-                            }
-                            resolve(fileInfo);
-                        } catch (error) {
-                            reject(new Error('Failed to parse file info response'));
-                        }
-                    } else {
-                        reject(new Error(`File info request failed: HTTP ${res.statusCode}`));
-                    }
-                });
-            });
-            
-            req.on('error', error => reject(error));
-            req.end();
+        const opts = this._httpOptions(`/ws/cpm/builtintext?${queryParams}`, 'GET', {
+            'Referer': `${this.baseUrl}/admin/customization/home.html`,
+            'Accept': 'application/json',
+            ...this.getAuthHeaders()
         });
+
+        const res = await this._httpRequest(opts);
+
+        if (res.statusCode !== 200) {
+            throw new Error(`File info request failed: HTTP ${res.statusCode}`);
+        }
+
+        try {
+            const fileInfo = JSON.parse(res.body);
+            if (fileInfo.activeCustomContentId) {
+                this.contentIdCache.set(filePath, fileInfo.activeCustomContentId);
+                this.saveCacheToStorage();
+            }
+            return fileInfo;
+        } catch {
+            throw new Error('Failed to parse file info response');
+        }
     }
 
     /**
@@ -670,12 +541,10 @@ class PowerSchoolAPI {
      * @returns {Promise<{activeCustomContentId: number}>}
      */
     async customizeAsset(filePath, builtInContent) {
-        const endpoint = '/ws/cpm/customizeAsset';
         await this.ensureAuthenticated();
 
         const fileName = filePath.split('/').pop() || '';
         const folderPath = filePath.substring(0, filePath.lastIndexOf('/'));
-
         const postData = new URLSearchParams({
             initialAssetContent: builtInContent || '',
             newAssetName: fileName,
@@ -683,50 +552,32 @@ class PowerSchoolAPI {
             newAssetType: 'file'
         }).toString();
 
-        const authHeaders = this.getAuthHeaders();
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: endpoint,
-            method: 'POST',
-            rejectUnauthorized: false,
-            headers: {
-                'Referer': `${this.baseUrl}/admin/customization/home.html`,
-                'Accept': 'application/json',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': Buffer.byteLength(postData),
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                ...authHeaders
-            }
-        };
-
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    if (res.statusCode === 200) {
-                        try {
-                            const result = JSON.parse(data);
-                            if (result.activeCustomContentId) {
-                                this.contentIdCache.set(filePath, result.activeCustomContentId);
-                                this.saveCacheToStorage();
-                            }
-                            resolve(result);
-                        } catch (e) {
-                            reject(new Error('Failed to parse customizeAsset response'));
-                        }
-                    } else if (res.statusCode === 403) {
-                        reject(new Error('Insufficient PowerSchool permissions to customize this file.'));
-                    } else {
-                        reject(new Error(`customizeAsset failed: HTTP ${res.statusCode}`));
-                    }
-                });
-            });
-            req.on('error', error => reject(error));
-            req.write(postData);
-            req.end();
+        const opts = this._httpOptions('/ws/cpm/customizeAsset', 'POST', {
+            'Referer': `${this.baseUrl}/admin/customization/home.html`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            ...this.getAuthHeaders()
         });
+
+        const res = await this._httpRequest(opts, postData);
+
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions to customize this file.');
+        }
+        if (res.statusCode !== 200) {
+            throw new Error(`customizeAsset failed: HTTP ${res.statusCode}`);
+        }
+
+        try {
+            const result = JSON.parse(res.body);
+            if (result.activeCustomContentId) {
+                this.contentIdCache.set(filePath, result.activeCustomContentId);
+                this.saveCacheToStorage();
+            }
+            return result;
+        } catch {
+            throw new Error('Failed to parse customizeAsset response');
+        }
     }
 
     async verifyUpload(filePath) {
@@ -741,17 +592,17 @@ class PowerSchoolAPI {
         try {
             await this.downloadFileInfo(filePath);
             return true;
-        } catch (error) {
+        } catch {
             return false;
         }
     }
 
     async createNewFile(filePath, content) {
-        return await this.uploadFileContent(filePath, content);
+        return this.uploadFileContent(filePath, content);
     }
 
     async updateExistingFileContent(filePath, content) {
-        return await this.uploadFileContent(filePath, content);
+        return this.uploadFileContent(filePath, content);
     }
 
     /**
@@ -761,65 +612,41 @@ class PowerSchoolAPI {
      * @returns {Promise<{success: boolean, message: string}>}
      */
     async deleteFile(filePath) {
-        const endpoint = '/ws/cpm/deleteFile';
         await this.ensureAuthenticated();
 
         const postData = `path=${encodeURIComponent(filePath)}`;
-        const authHeaders = this.getAuthHeaders();
-
-        const options = {
-            hostname: new URL(this.baseUrl).hostname,
-            port: 443,
-            path: endpoint,
-            method: 'POST',
-            rejectUnauthorized: false,
-            headers: {
-                'Referer': `${this.baseUrl}/admin/customization/home.html`,
-                'Accept': 'application/json',
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Content-Length': Buffer.byteLength(postData),
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
-                ...authHeaders
-            }
-        };
-
-        return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
-                let data = '';
-                res.on('data', chunk => data += chunk);
-                res.on('end', () => {
-                    try {
-                        const result = JSON.parse(data);
-
-                        if (res.statusCode === 200) {
-                            // Check for success message
-                            if (result.returnMessage === 'The file was deleted sucessfully') {
-                                // Note: PowerSchool has a typo in "sucessfully" - matching their API
-                                // Remove from cache since file no longer exists
-                                this.contentIdCache.delete(filePath);
-                                this.saveCacheToStorage();
-
-                                resolve({ success: true, message: 'File deleted successfully' });
-                            } else if (result.returnMessage) {
-                                reject(new Error(result.returnMessage));
-                            } else {
-                                resolve({ success: true, message: 'File deleted' });
-                            }
-                        } else if (res.statusCode === 400) {
-                            reject(new Error(result.message || 'File could not be deleted'));
-                        } else {
-                            reject(new Error(`Delete failed: HTTP ${res.statusCode}`));
-                        }
-                    } catch (error) {
-                        reject(new Error(`Failed to parse delete response: ${error.message}`));
-                    }
-                });
-            });
-
-            req.on('error', error => reject(new Error(`Delete request failed: ${error.message}`)));
-            req.write(postData);
-            req.end();
+        const opts = this._httpOptions('/ws/cpm/deleteFile', 'POST', {
+            'Referer': `${this.baseUrl}/admin/customization/home.html`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            ...this.getAuthHeaders()
         });
+
+        const res = await this._httpRequest(opts, postData);
+
+        let result;
+        try {
+            result = JSON.parse(res.body);
+        } catch (err) {
+            throw new Error(`Failed to parse delete response: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        if (res.statusCode === 200) {
+            if (result.returnMessage === 'The file was deleted sucessfully') {
+                // Note: PowerSchool has a typo in "sucessfully" — matching their API
+                this.contentIdCache.delete(filePath);
+                this.saveCacheToStorage();
+                return { success: true, message: 'File deleted successfully' };
+            }
+            if (result.returnMessage) throw new Error(result.returnMessage);
+            return { success: true, message: 'File deleted' };
+        }
+
+        if (res.statusCode === 400) {
+            throw new Error(result.message || 'File could not be deleted');
+        }
+
+        throw new Error(`Delete failed: HTTP ${res.statusCode}`);
     }
 }
 
