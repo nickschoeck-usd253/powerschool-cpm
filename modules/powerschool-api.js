@@ -1,6 +1,5 @@
 const vscode = require('vscode');
 const https = require('https');
-const pathUtils = require('./path-utils');
 
 function generateMultipartData(fields, boundary) {
     let data = '';
