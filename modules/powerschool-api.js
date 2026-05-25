@@ -49,7 +49,7 @@ class PowerSchoolAPI {
         this.baseUrl = config.get('serverUrl', '').replace(/\/$/, '');
         this.username = config.get('username');
         this.password = config.get('password');
-        this.rejectUnauthorized = !config.get('allowInsecureSsl', true);
+        this.rejectUnauthorized = !config.get('allowInsecureSsl', false);
 
         if (!this.baseUrl) {
             throw new Error('PowerSchool server URL not configured. Please set ps-vscode-cpm.serverUrl in settings.');
@@ -371,9 +371,9 @@ class PowerSchoolAPI {
      * @returns {Promise<{content: string, customContentId: number|null, isCustom: boolean, rawResponse: object|null}>}
      *
      * Priority order for content fields:
-     * 1. builtInText — built-in files (skip if it's the "not available" placeholder)
-     * 2. customPageContent — custom files (LoadFolderInfo=false path)
-     * 3. activeCustomText — customized files (skip if it's the "not available" placeholder)
+     * 1. customPageContent — new custom files (not built-ins; LoadFolderInfo=false path)
+     * 2. activeCustomText — active customized content for built-in files (skip "not available" placeholder)
+     * 3. builtInText — original built-in content fallback (skip "not available" placeholder)
      */
     async downloadFileWithMetadata(filePath) {
         const queryParams = new URLSearchParams({ LoadFolderInfo: 'false', path: filePath });
@@ -398,12 +398,12 @@ class PowerSchoolAPI {
             const result = JSON.parse(res.body);
 
             let content = '';
-            if (result.builtInText && !result.builtInText.startsWith('Built in file')) {
-                content = result.builtInText;
-            } else if (result.customPageContent) {
+            if (result.customPageContent) {
                 content = result.customPageContent;
             } else if (result.activeCustomText && !result.activeCustomText.startsWith('Active custom file')) {
                 content = result.activeCustomText;
+            } else if (result.builtInText && !result.builtInText.startsWith('Built in file')) {
+                content = result.builtInText;
             }
 
             // Fallback: if no active content yet but version history exists, use first entry
