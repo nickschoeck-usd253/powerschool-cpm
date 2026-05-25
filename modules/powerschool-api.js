@@ -86,9 +86,12 @@ class PowerSchoolAPI {
         
         for (const cookie of cookieHeaders) {
             const [nameValue] = cookie.split(';');
-            const [name, value] = nameValue.split('=');
+            const eqIdx = nameValue.indexOf('=');
+            if (eqIdx === -1) continue;
+            const name = nameValue.slice(0, eqIdx).trim();
+            const value = nameValue.slice(eqIdx + 1).trim();
             if (name && value) {
-                this.cookies.set(name.trim(), value.trim());
+                this.cookies.set(name, value);
             }
         }
     }
@@ -154,7 +157,8 @@ class PowerSchoolAPI {
             const req = https.request(options, (res) => {
                 this.parseCookies(res.headers['set-cookie']);
                 
-                if (res.statusCode === 200 || res.statusCode === 302) {
+                // 302 = successful redirect to dashboard; 200 = login page returned (bad credentials)
+                if (res.statusCode === 302) {
                     this.sessionValid = true;
                     this.lastSessionCheck = Date.now();
                     resolve(true);
