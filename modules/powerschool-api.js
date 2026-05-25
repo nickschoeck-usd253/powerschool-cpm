@@ -1,5 +1,7 @@
 const vscode = require('vscode');
 const https = require('https');
+// @ts-ignore — JSON require is valid at runtime; resolveJsonModule not set in jsconfig
+const PKG_VERSION = require('../package.json').version ?? '0.0.0';
 
 function generateMultipartData(fields, boundary) {
     let data = '';
@@ -82,7 +84,7 @@ class PowerSchoolAPI {
             method,
             rejectUnauthorized: this.rejectUnauthorized,
             headers: {
-                'User-Agent': 'ps-vscode-cpm/2.5.0',
+                'User-Agent': `ps-vscode-cpm/${PKG_VERSION}`,
                 ...extraHeaders
             }
         };
