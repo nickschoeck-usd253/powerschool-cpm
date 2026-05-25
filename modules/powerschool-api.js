@@ -245,6 +245,10 @@ class PowerSchoolAPI {
         const opts = this._httpOptions(endpoint, method, extraHeaders);
         const res = await this._httpRequest(opts, body);
 
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions. Ensure your account has CPM admin access.');
+        }
+
         try {
             return { statusCode: res.statusCode, data: res.body ? JSON.parse(res.body) : {} };
         } catch {
@@ -301,6 +305,47 @@ class PowerSchoolAPI {
         }
     }
 
+    /**
+     * Returns the file listing for a schema root.
+     * GET /ws/cpm/content?root=...
+     * Mirrors cpmServices.js getContentRoot() (lines 690-703).
+     * @param {string} root - 'queries_root' or 'user_schema_root'
+     */
+    async getSchemaRootTree(root) {
+        const queryParams = new URLSearchParams({ root });
+        const endpoint = `/ws/cpm/content?${queryParams.toString()}`;
+        const response = await this.makeRequest(endpoint);
+        if (response.statusCode !== 200) {
+            throw new Error(`Failed to get schema root tree: HTTP ${response.statusCode}`);
+        }
+        return response.data;
+    }
+
+    /**
+     * Fetches content for a file in a schema root.
+     * GET /ws/cpm/customresource?path=...&root=...
+     * Mirrors cpmServices.js getNonWebContent() (lines 734-762).
+     * @param {string} filePath - File path within the schema root
+     * @param {string} root - 'queries_root' or 'user_schema_root'
+     * @returns {Promise<{content: string, isCustom: boolean, activeCustomContentId: number|null}>}
+     */
+    async getSchemaFileContent(filePath, root) {
+        const queryParams = new URLSearchParams({ path: filePath, root });
+        const endpoint = `/ws/cpm/customresource?${queryParams.toString()}`;
+        const response = await this.makeRequest(endpoint);
+        if (response.statusCode !== 200) {
+            throw new Error(`Failed to get schema file: HTTP ${response.statusCode}`);
+        }
+        const result = /** @type {any} */ (response.data);
+        const content = result.activeCustomText || result.builtInText || '';
+        const customContentId = result.activeCustomContentId || null;
+        if (customContentId) {
+            this.contentIdCache.set(filePath, customContentId);
+            this.saveCacheToStorage();
+        }
+        return { content, isCustom: result.isCustom === true, activeCustomContentId: customContentId };
+    }
+
     async downloadFileContent(filePath) {
         const result = await this.downloadFileWithMetadata(filePath);
         return result.content;
@@ -329,6 +374,9 @@ class PowerSchoolAPI {
 
         const res = await this._httpRequest(opts);
 
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions to access this file.');
+        }
         if (res.statusCode !== 200) {
             throw new Error(`Download failed: HTTP ${res.statusCode}`);
         }
@@ -345,7 +393,11 @@ class PowerSchoolAPI {
                 content = result.activeCustomText;
             }
 
-            const customContentId = result.activeCustomContentId || null;
+            // Fallback: if no active content yet but version history exists, use first entry
+            let customContentId = result.activeCustomContentId || null;
+            if (!customContentId && result.versionAssetContentIds?.length > 0) {
+                customContentId = result.versionAssetContentIds[0];
+            }
             if (customContentId) {
                 this.contentIdCache.set(filePath, customContentId);
                 this.saveCacheToStorage();
@@ -357,8 +409,12 @@ class PowerSchoolAPI {
         }
     }
 
-    async uploadFileContent(filePath, content) {
+    async uploadFileContent(filePath, content, { isCustom = true, builtInContent = '' } = {}) {
         await this.ensureAuthenticated();
+
+        if (!isCustom) {
+            await this.customizeAsset(filePath, builtInContent);
+        }
 
         const cachedId = this.contentIdCache.get(filePath);
         if (cachedId) {
@@ -409,6 +465,9 @@ class PowerSchoolAPI {
 
         const res = await this._httpRequest(opts, body);
 
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions to publish this file.');
+        }
         if (res.statusCode < 200 || res.statusCode >= 300) {
             throw new Error(`Upload failed: HTTP ${res.statusCode}`);
         }
@@ -422,6 +481,10 @@ class PowerSchoolAPI {
 
         if (result.returnMessage?.includes('system error') || result.returnMessage?.includes('could not be saved')) {
             throw new Error(result.returnMessage);
+        }
+        if (result.activeCustomContentId) {
+            this.contentIdCache.set(filePath, result.activeCustomContentId);
+            this.saveCacheToStorage();
         }
         return result;
     }
@@ -451,6 +514,54 @@ class PowerSchoolAPI {
             return fileInfo;
         } catch {
             throw new Error('Failed to parse file info response');
+        }
+    }
+
+    /**
+     * Promotes a built-in asset to a customizable one by creating an initial draft.
+     * Must be called before the first customPageContent save when isCustom = false.
+     * Mirrors cpmServices.js customizeAsset() (lines 802-828).
+     * @param {string} filePath - Remote path (e.g., /admin/home.html)
+     * @param {string} builtInContent - The builtInText from the prior builtintext response
+     * @returns {Promise<{activeCustomContentId: number}>}
+     */
+    async customizeAsset(filePath, builtInContent) {
+        await this.ensureAuthenticated();
+
+        const fileName = filePath.split('/').pop() || '';
+        const folderPath = filePath.substring(0, filePath.lastIndexOf('/'));
+        const postData = new URLSearchParams({
+            initialAssetContent: builtInContent || '',
+            newAssetName: fileName,
+            newAssetPath: folderPath,
+            newAssetType: 'file'
+        }).toString();
+
+        const opts = this._httpOptions('/ws/cpm/customizeAsset', 'POST', {
+            'Referer': `${this.baseUrl}/admin/customization/home.html`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            ...this.getAuthHeaders()
+        });
+
+        const res = await this._httpRequest(opts, postData);
+
+        if (res.statusCode === 403) {
+            throw new Error('Insufficient PowerSchool permissions to customize this file.');
+        }
+        if (res.statusCode !== 200) {
+            throw new Error(`customizeAsset failed: HTTP ${res.statusCode}`);
+        }
+
+        try {
+            const result = JSON.parse(res.body);
+            if (result.activeCustomContentId) {
+                this.contentIdCache.set(filePath, result.activeCustomContentId);
+                this.saveCacheToStorage();
+            }
+            return result;
+        } catch {
+            throw new Error('Failed to parse customizeAsset response');
         }
     }
 
