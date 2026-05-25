@@ -154,14 +154,23 @@ class PowerSchoolAPI {
         };
 
         return new Promise((resolve, reject) => {
-            const req = https.request(options, (res) => {
+            const req = https.request(options, async (res) => {
                 this.parseCookies(res.headers['set-cookie']);
-                
-                // 302 = successful redirect to dashboard; 200 = login page returned (bad credentials)
+                // consume body so the socket is released before any follow-up request
+                res.resume();
+
                 if (res.statusCode === 302) {
                     this.sessionValid = true;
                     this.lastSessionCheck = Date.now();
                     resolve(true);
+                } else if (res.statusCode === 200) {
+                    // Some PS versions return 200 on success rather than redirecting.
+                    // Verify by probing a page that requires auth.
+                    try {
+                        resolve(await this.checkSession());
+                    } catch (e) {
+                        resolve(false);
+                    }
                 } else {
                     resolve(false);
                 }
