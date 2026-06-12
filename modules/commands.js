@@ -135,6 +135,96 @@ async function createPluginZip(pluginName, version, dirsToInclude) {
     }
 }
 
+// Command to automatically create folders and the plugin.xml file for a new plugin
+async function createPluginFileStructure() {
+    const pluginName = await vscode.window.showInputBox({
+        prompt: 'Enter plugin name',
+        value: vscode.workspace.name,
+        validateInput: (value) => {
+            if (!value || !value.trim()) return 'Version is required';
+            return null;
+        }
+    });
+
+    if ( !pluginName ) return;
+
+    const pluginArtifactsRoot = pathUtils.getPluginArtifactsRoot();
+    const pluginFilesRoot = pathUtils.getPluginFilesRoot();
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath || pluginArtifactsRoot;
+
+    const distDir = path.join(workspaceRoot, 'dist');
+    if (!fs.existsSync(distDir)) {
+        fs.mkdirSync(distDir, { recursive: true });
+    }
+
+    if (!fs.existsSync(pluginArtifactsRoot)) {
+        fs.mkdirSync(pluginArtifactsRoot, { recursive: true });
+    }
+
+    if (!fs.existsSync(pluginFilesRoot)) {
+        fs.mkdirSync(pluginFilesRoot, { recursive: true });
+    }
+
+    const folders = ['pagecataloging', 'permissions_root', 'queries_root', 'user_schema_root'];
+    for (const folder of folders) {
+        const folderPath = path.join(pluginArtifactsRoot, folder);
+        if (!fs.existsSync(folderPath)) {
+            fs.mkdirSync(folderPath, { recursive: true });
+        }
+    }
+
+    const pluginXmlTemplate = getTemplate('pluginXml');
+    if (!pluginXmlTemplate) {
+        vscode.window.showErrorMessage('Template not found');
+        return;
+    }
+
+    const pluginXmlPath = getPluginXmlPath();
+    if ( fs.existsSync(pluginXmlPath) ) {
+        const overwrite = await vscode.window.showWarningMessage(
+            `plugin.xml File already exists at ${pluginXmlPath}. Overwrite?`,
+            'Overwrite',
+            'Cancel'
+        );
+        if (overwrite !== 'Overwrite') return;
+    }
+
+    const localDir = path.dirname(pluginXmlPath);
+    if (!fs.existsSync(localDir)) {
+        fs.mkdirSync(localDir, { recursive: true });
+    }
+    
+    fs.writeFileSync(pluginXmlPath, pluginXmlTemplate.content);
+
+    const config = vscode.workspace.getConfiguration('ps-vscode-cpm');
+    const pluginDefaultPublisher = config.get('defaultPluginPublisher', '');
+    const pluginDefaultEmail = config.get('defaultPluginContactEmail', '');
+
+    try {
+        let xmlContent = fs.readFileSync(pluginXmlPath, 'utf8');
+        xmlContent = xmlContent.replace(
+            /(<plugin\b[^>]*)\bname="["]/,
+            `$1name="${pluginName}"`
+        );
+
+        xmlContent = xmlContent.replace(
+            /(<publisher\b[^>]*)\bname="["]/,
+            `$1name="${pluginDefaultPublisher}"`
+        );
+
+        xmlContent = xmlContent.replace(
+            /(<contact\b[^>]*)\bemail="["]/,
+            `$1email="${pluginDefaultEmail}"`
+        );
+
+        fs.writeFileSync(pluginXmlPath, xmlContent);
+    } catch (error) {
+        vscode.window.showErrorMessage(`Error updating the default plugin.xml: ${error}`);
+    }
+
+    return true;
+}
+
 function registerCommands(context, api, treeProvider) {
     // Safe command registration helper
     const registerCommandSafely = (commandId, callback) => {
@@ -739,6 +829,18 @@ function registerPluginCommands(context, api, treeProvider) {
             vscode.window.showErrorMessage(`Failed to open chat: ${error.message}`);
         }
     }));
+
+    // Create default folders and plugin.xml file for a new plugin.
+    commands.push(registerCommandSafely('ps-vscode-cpm.createFileStructure', async () => {
+        try {
+            const ret = await createPluginFileStructure();
+            if ( ret ) {
+                vscode.window.showInformationMessage(`Created structure for plugin.`);
+            }
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to create plugin file structure: ${error.message}`);
+        }
+    }))
 
     return commands;
 }

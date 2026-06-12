@@ -209,6 +209,20 @@ class CommandsProvider {
             }
         ));
 
+        // Plugin Commands
+        items.push(new PanelTreeItem(
+            'Create Plugin File Structure',
+            'command',
+            {
+                iconPath: new vscode.ThemeIcon('files'),
+                tooltip: 'Create the default folders for a plugin',
+                command: {
+                    command: 'ps-vscode-cpm.createFileStructure',
+                    title: 'File Structure'
+                }
+            }
+        ));
+
         // Settings & Connection
         const jsonAvailable = hasJsonFilesInWebRoot();
         items.push(new PanelTreeItem(

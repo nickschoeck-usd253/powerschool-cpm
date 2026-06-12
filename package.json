@@ -298,6 +298,16 @@
           "enum": ["web_root", "queries_root", "user_schema_root"],
           "default": "web_root",
           "description": "Which CPM content root to browse. Use 'web_root' for standard pages, 'queries_root' or 'user_schema_root' for extended schema."
+        },
+        "ps-vscode-cpm.defaultPluginPublisher": {
+          "type": "string",
+          "default": "",
+          "description": "Name to be used for the publisher field when making a default plugin.xml"
+        },
+        "ps-vscode-cpm.defaultPluginContactEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Email to be used for the publisher email contact field when making a default plugin.xml"
         }
       }
     }

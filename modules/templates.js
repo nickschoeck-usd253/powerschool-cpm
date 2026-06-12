@@ -197,6 +197,25 @@ TemplateName:Parent Portal
 ~[wc:guardian_footer] 
 </body> 
 </html>`
+    },
+
+    pluginXml: {
+        name: 'plugin.xml',
+        extension: '.xml',
+        category: 'Plugin',
+        description: 'Default plugin.xml template',
+        content: `<?xml version="1.0" encoding="UTF-8"?>
+<plugin xmlns="http://plugin.powerschool.pearson.com"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://plugin.powerschool.pearson.com plugin.xsd"
+    description=""
+    name=""
+    version="0.0.0">
+
+    <publisher name="">
+        <contact email=""/>
+    </publisher>
+</plugin>`
     }
 };
 
