@@ -216,6 +216,17 @@ TemplateName:Parent Portal
         <contact email=""/>
     </publisher>
 </plugin>`
+    },
+
+    pageExtension: {
+        name: 'PowerSchool Page Fragment',
+        extension: '.txt',
+        category: 'Plugin',
+        description: 'A page fragment for PowerSchool pages',
+        content: `<script>
+    $j(function(){
+    })
+</script>`
     }
 };
 

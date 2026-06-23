@@ -304,12 +304,12 @@ function registerCommands(context, api, treeProvider) {
                         const dataLength = typeof response.data === 'string'
                             ? response.data.length
                             : JSON.stringify(response.data).length;
-                        out.appendLine(`✅ ${jsonPath}  [${response.statusCode}]  ${dataLength} bytes`);
+                        out.appendLine(`✓ ${jsonPath}  [${response.statusCode}]  ${dataLength} bytes`);
                     } else {
-                        out.appendLine(`❌ ${jsonPath}  [${response.statusCode}]`);
+                        out.appendLine(`✓ ${jsonPath}  [${response.statusCode}]`);
                     }
                 } catch (error) {
-                    out.appendLine(`❌ ${jsonPath}  ${error.message}`);
+                    out.appendLine(`✓ ${jsonPath}  ${error.message}`);
                 }
             }
 
@@ -394,7 +394,7 @@ function registerCommands(context, api, treeProvider) {
             const webRootSubdir = config.get('pluginWebRoot') || 'web_root';
             const webRootPath = path.join(pluginFilesRoot, webRootSubdir);
             if (fs.existsSync(webRootPath)) {
-                const info = `📂 Plugin web_root directory already exists at:\n${webRootSubdir}/\n\n` +
+                const info = `✗ Plugin web_root directory already exists at:\n${webRootSubdir}/\n\n` +
                     `Files downloaded from PowerSchool will be saved here to match your plugin structure.`;
                 vscode.window.showInformationMessage(info);
                 return;
@@ -411,7 +411,7 @@ function registerCommands(context, api, treeProvider) {
                 treeProvider.localRootPath = webRootPath;
                 treeProvider.refresh();
                 vscode.window.showInformationMessage(
-                    `✅ Created ${webRootSubdir}/ directory.\n\n` +
+                    `✓ Created ${webRootSubdir}/ directory.\n\n` +
                     `PowerSchool files will now be saved here to match your plugin structure.`
                 );
             }
@@ -799,7 +799,7 @@ function registerPluginCommands(context, api, treeProvider) {
             
             const zipFileName = path.basename(zipFilePath);
             const openFolder = await vscode.window.showInformationMessage(
-                `✅ Plugin packaged successfully!\\n\\n${zipFileName}\\n\\nReady to install in PowerSchool.`,
+                `✓ Plugin packaged successfully!\\n\\n${zipFileName}\\n\\nReady to install in PowerSchool.`,
                 'Show in Folder',
                 'OK'
             );
